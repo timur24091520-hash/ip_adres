@@ -1,121 +1,283 @@
 import telebot
-import requests
-from threading import Thread
-import time
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+import sqlite3
+import os
+import logging
 
-# Замените 'YOUR_TELEGRAM_BOT_TOKEN' на токен вашего бота от @BotFather
-API_TOKEN = 'YOUR_TELEGRAM_BOT_TOKEN'
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-bot = telebot.TeleBot(API_TOKEN)
+# Токен бота
+BOT_TOKEN = "YOUR_BOT_TOKEN"
+CHANNEL_USERNAME = "@dragoncaneloni67"  # Ваш канал
 
-def get_public_ip():
-    """Получает публичный IP адрес"""
-    try:
-        response = requests.get('https://api.ipify.org?format=json', timeout=10)
-        if response.status_code == 200:
-            return response.json()['ip']
-        else:
-            return "Не удалось получить IP"
-    except Exception as e:
-        return f"Ошибка при получении IP: {str(e)}"
+# Инициализация бота
+bot = telebot.TeleBot(BOT_TOKEN)
 
-def get_detailed_ip_info():
-    """Получает подробную информацию об IP"""
-    try:
-        response = requests.get('https://ipapi.co/json/', timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            return data
-        else:
-            return None
-    except Exception as e:
-        return None
+# Инициализация базы данных
+def init_db():
+    conn = sqlite3.connect('posts.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            message_type TEXT,
+            content TEXT,
+            file_id TEXT,
+            status TEXT DEFAULT 'pending',
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-@bot.message_handler(commands=['start', 'help'])
+# Функция для сохранения поста в БД
+def save_post(user_id, message_type, content, file_id=None):
+    conn = sqlite3.connect('posts.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO posts (user_id, message_type, content, file_id)
+        VALUES (?, ?, ?, ?)
+    ''', (user_id, message_type, content, file_id))
+    post_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return post_id
+
+# Функция для получения постов на модерации
+def get_pending_posts():
+    conn = sqlite3.connect('posts.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM posts WHERE status = "pending" ORDER BY timestamp')
+    posts = cursor.fetchall()
+    conn.close()
+    return posts
+
+# Функция для обновления статуса поста
+def update_post_status(post_id, status):
+    conn = sqlite3.connect('posts.db')
+    cursor = conn.cursor()
+    cursor.execute('UPDATE posts SET status = ? WHERE id = ?', (status, post_id))
+    conn.commit()
+    conn.close()
+
+# Обработчик команды /start
+@bot.message_handler(commands=['start'])
 def send_welcome(message):
-    """Обработчик команд /start и /help"""
     welcome_text = """
-🤖 Привет! Я бот для проверки IP адреса.
+🤖 Добро пожаловать в бот-модератор для канала @dragoncaneloni67!
 
-Доступные команды:
-/ip - Показать мой публичный IP адрес
-/ipinfo - Подробная информация об IP
-/help - Показать эту справку
+Вы можете предложить пост для публикации в канале. Просто отправьте:
+• Текст
+• Фото с подписью
+• Видео с подписью
+• Документ с подписью
 
-Просто отправь мне команду и я покажу информацию о IP адресе сервера, на котором я запущен.
+После проверки модератором ваш пост будет опубликован в канале!
     """
-    bot.reply_to(message, welcome_text)
+    bot.send_message(message.chat.id, welcome_text)
 
-@bot.message_handler(commands=['ip'])
-def send_ip(message):
-    """Обработчик команды /ip - показывает публичный IP"""
-    bot.send_chat_action(message.chat.id, 'typing')
+# Обработчик текстовых сообщений
+@bot.message_handler(content_types=['text'])
+def handle_text(message):
+    if message.text.startswith('/'):
+        return
     
-    ip_address = get_public_ip()
+    post_id = save_post(message.from_user.id, 'text', message.text)
     
-    response_text = f"🌐 Ваш публичный IP адрес:\n`{ip_address}`"
-    bot.reply_to(message, response_text, parse_mode='Markdown')
-
-@bot.message_handler(commands=['ipinfo'])
-def send_ip_info(message):
-    """Обработчик команды /ipinfo - показывает подробную информацию об IP"""
-    bot.send_chat_action(message.chat.id, 'typing')
+    # Уведомление пользователю
+    bot.send_message(message.chat.id, "✅ Ваш текст отправлен на модерацию!")
     
-    ip_info = get_detailed_ip_info()
+    # Уведомление администратору
+    notify_admin(post_id, message.from_user)
+
+# Обработчик фото
+@bot.message_handler(content_types=['photo'])
+def handle_photo(message):
+    if message.caption is None:
+        bot.send_message(message.chat.id, "⚠️ Пожалуйста, добавьте подпись к фото!")
+        return
     
-    if ip_info:
-        response_text = f"""
-📊 Подробная информация об IP:
-
-🏠 IP адрес: `{ip_info.get('ip', 'N/A')}`
-🌍 Страна: {ip_info.get('country_name', 'N/A')} ({ip_info.get('country_code', 'N/A')})
-🏙️ Город: {ip_info.get('city', 'N/A')}
-📮 Регион: {ip_info.get('region', 'N/A')}
-📝 Провайдер: {ip_info.get('org', 'N/A')}
-🗺️ Часовой пояс: {ip_info.get('timezone', 'N/A')}
-💻 ASN: {ip_info.get('asn', 'N/A')}
-        """
-    else:
-        response_text = "❌ Не удалось получить подробную информацию об IP"
+    file_id = message.photo[-1].file_id
+    post_id = save_post(message.from_user.id, 'photo', message.caption, file_id)
     
-    bot.reply_to(message, response_text, parse_mode='Markdown')
+    bot.send_message(message.chat.id, "✅ Ваше фото с подписью отправлено на модерацию!")
+    notify_admin(post_id, message.from_user)
 
-@bot.message_handler(func=lambda message: True)
-def echo_all(message):
-    """Обработчик любых других сообщений"""
-    help_text = """
-Не понимаю команду 😊
+# Обработчик видео
+@bot.message_handler(content_types=['video'])
+def handle_video(message):
+    if message.caption is None:
+        bot.send_message(message.chat.id, "⚠️ Пожалуйста, добавьте подпись к видео!")
+        return
+    
+    file_id = message.video.file_id
+    post_id = save_post(message.from_user.id, 'video', message.caption, file_id)
+    
+    bot.send_message(message.chat.id, "✅ Ваше видео с подписью отправлено на модерацию!")
+    notify_admin(post_id, message.from_user)
 
-Используйте:
-/ip - узнать IP адрес
-/ipinfo - подробная информация
-/help - справка
-    """
-    bot.reply_to(message, help_text)
+# Обработчик документов
+@bot.message_handler(content_types=['document'])
+def handle_document(message):
+    if message.caption is None:
+        bot.send_message(message.chat.id, "⚠️ Пожалуйста, добавьте подпись к документу!")
+        return
+    
+    file_id = message.document.file_id
+    post_id = save_post(message.from_user.id, 'document', message.caption, file_id)
+    
+    bot.send_message(message.chat.id, "✅ Ваш документ с подписью отправлен на модерацию!")
+    notify_admin(post_id, message.from_user)
 
-def start_bot_polling():
-    """Запускает polling бота с обработкой ошибок"""
-    while True:
+# Уведомление администратора о новом посте
+def notify_admin(post_id, user):
+    posts = get_pending_posts()
+    current_post = None
+    
+    for post in posts:
+        if post[0] == post_id:
+            current_post = post
+            break
+    
+    if not current_post:
+        return
+    
+    admin_chat_id = "YOUR_ADMIN_CHAT_ID"  # Замените на ваш chat_id
+    
+    keyboard = InlineKeyboardMarkup()
+    keyboard.row(
+        InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{post_id}"),
+        InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{post_id}")
+    )
+    
+    user_info = f"👤 Пользователь: @{user.username or 'нет username'}\nID: {user.id}\n"
+    post_info = f"📝 Тип: {current_post[2]}\nВремя: {current_post[6]}\n\n"
+    
+    if current_post[2] == 'text':
+        message_text = user_info + post_info + f"Текст:\n{current_post[3]}"
+        bot.send_message(admin_chat_id, message_text, reply_markup=keyboard)
+    
+    elif current_post[2] == 'photo':
+        message_text = user_info + post_info + f"Подпись:\n{current_post[3]}"
+        bot.send_photo(admin_chat_id, current_post[4], caption=message_text, reply_markup=keyboard)
+    
+    elif current_post[2] == 'video':
+        message_text = user_info + post_info + f"Подпись:\n{current_post[3]}"
+        bot.send_video(admin_chat_id, current_post[4], caption=message_text, reply_markup=keyboard)
+    
+    elif current_post[2] == 'document':
+        message_text = user_info + post_info + f"Подпись:\n{current_post[3]}"
+        bot.send_document(admin_chat_id, current_post[4], caption=message_text, reply_markup=keyboard)
+
+# Обработчик callback-запросов (кнопки одобрить/отклонить)
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
+    if call.data.startswith('approve_'):
+        post_id = int(call.data.split('_')[1])
+        approve_post(post_id, call.message)
+    
+    elif call.data.startswith('reject_'):
+        post_id = int(call.data.split('_')[1])
+        reject_post(post_id, call.message)
+
+# Функция одобрения поста
+def approve_post(post_id, admin_message):
+    conn = sqlite3.connect('posts.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM posts WHERE id = ?', (post_id,))
+    post = cursor.fetchone()
+    conn.close()
+    
+    if not post:
+        bot.answer_callback_query(admin_message.id, "Пост не найден!")
+        return
+    
+    # Публикация в канал
+    try:
+        if post[2] == 'text':
+            bot.send_message(CHANNEL_USERNAME, post[3])
+        
+        elif post[2] == 'photo':
+            bot.send_photo(CHANNEL_USERNAME, post[4], caption=post[3])
+        
+        elif post[2] == 'video':
+            bot.send_video(CHANNEL_USERNAME, post[4], caption=post[3])
+        
+        elif post[2] == 'document':
+            bot.send_document(CHANNEL_USERNAME, post[4], caption=post[3])
+        
+        # Обновление статуса
+        update_post_status(post_id, 'approved')
+        
+        # Уведомление пользователю
         try:
-            print("🤖 Бот запущен...")
-            bot.polling(none_stop=True, interval=0, timeout=20)
-        except Exception as e:
-            print(f"❌ Ошибка: {e}")
-            print("🔄 Перезапуск через 5 секунд...")
-            time.sleep(5)
+            bot.send_message(post[1], "🎉 Ваш пост был одобрен и опубликован в канале!")
+        except:
+            pass
+        
+        # Обновление сообщения админа
+        bot.edit_message_text(
+            chat_id=admin_message.chat.id,
+            message_id=admin_message.message_id,
+            text=f"✅ Пост одобрен и опубликован!\n\n{admin_message.text}",
+            reply_markup=None
+        )
+        
+        bot.answer_callback_query(admin_message.id, "Пост опубликован!")
+        
+    except Exception as e:
+        logger.error(f"Ошибка публикации: {e}")
+        bot.answer_callback_query(admin_message.id, "Ошибка публикации!")
+
+# Функция отклонения поста
+def reject_post(post_id, admin_message):
+    update_post_status(post_id, 'rejected')
+    
+    conn = sqlite3.connect('posts.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT user_id FROM posts WHERE id = ?', (post_id,))
+    user_id = cursor.fetchone()[0]
+    conn.close()
+    
+    # Уведомление пользователю
+    try:
+        bot.send_message(user_id, "❌ К сожалению, ваш пост был отклонен модератором.")
+    except:
+        pass
+    
+    # Обновление сообщения админа
+    bot.edit_message_text(
+        chat_id=admin_message.chat.id,
+        message_id=admin_message.message_id,
+        text=f"❌ Пост отклонен!\n\n{admin_message.text}",
+        reply_markup=None
+    )
+    
+    bot.answer_callback_query(admin_message.id, "Пост отклонен!")
+
+# Команда для админа - просмотр очереди
+@bot.message_handler(commands=['moderate'])
+def show_moderation_queue(message):
+    # Проверка, что это админ (замените на ваш chat_id)
+    if message.from_user.id != YOUR_ADMIN_CHAT_ID:
+        bot.send_message(message.chat.id, "У вас нет прав для этой команды.")
+        return
+    
+    posts = get_pending_posts()
+    
+    if not posts:
+        bot.send_message(message.chat.id, "✅ Нет постов на модерации!")
+        return
+    
+    bot.send_message(message.chat.id, f"📋 Постов на модерации: {len(posts)}")
+    
+    for post in posts:
+        notify_admin(post[0], type('User', (), {'id': post[1], 'username': 'user'}))
 
 if __name__ == "__main__":
-    print("🚀 Запуск Telegram бота для проверки IP...")
-    print("📝 Убедитесь, что вы заменили 'YOUR_TELEGRAM_BOT_TOKEN' на реальный токен бота")
-    
-    # Запускаем бота в отдельном потоке
-    bot_thread = Thread(target=start_bot_polling)
-    bot_thread.daemon = True
-    bot_thread.start()
-    
-    try:
-        # Бесконечный цикл для поддержания работы программы
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("\n👋 Остановка бота...")
+    init_db()
+    logger.info("Бот запущен!")
+    bot.infinity_polling()
